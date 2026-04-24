@@ -19,6 +19,21 @@ pip install mmcv-full==1.6.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13/index.html
 ```
 
+**c2. Swap `opencv-python` for `opencv-python-headless`.** `mmcv-full` pulls
+`opencv-python`, whose recent wheels bundle a hashed Qt5 library under
+`cv2/.libs/` that fails to load on headless servers (symptom:
+`ImportError: libQt5Core-195a14c9.so.5.15.18: cannot open shared object
+file`). Replace it with the headless build — `cv2` is the same module, minus
+the Qt/GTK dependencies. Note: pip treats the two packages as distinct, so
+this must run AFTER `mmcv-full` is installed (pre-installing headless will
+not stop mmcv from pulling the GUI wheel).
+```shell
+pip uninstall -y opencv-python opencv-python-headless
+pip install opencv-python-headless==4.5.5.64
+```
+On an offline server, transfer the wheel and install via
+`pip install --no-index --find-links /path/to/wheels opencv-python-headless==4.5.5.64`.
+
 **d. Install mmdet and mmseg.**
 ```shell
 pip install mmdet==2.25.1

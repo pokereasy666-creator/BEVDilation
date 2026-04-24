@@ -57,6 +57,12 @@ pip install mmcv-full==1.6.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13/index.html
 pip install mmdet==2.25.1 mmsegmentation==0.25.0
 
+# Swap opencv-python (GUI build; bundles Qt5 libs that fail to load on
+# headless servers) for opencv-python-headless. Must run AFTER mmcv-full,
+# since pip treats the two packages as distinct.
+pip uninstall -y opencv-python opencv-python-headless
+pip install opencv-python-headless==4.5.5.64
+
 pip install causal-conv1d==1.1.0
 pip install mamba-ssm==1.1.2
 pip install spconv-cu117
@@ -111,6 +117,7 @@ pip download --dest ./wheels \
     mmcv-full==1.6.0 -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13/index.html
 pip download --dest ./wheels \
     mmdet==2.25.1 mmsegmentation==0.25.0 \
+    opencv-python-headless==4.5.5.64 \
     causal-conv1d==1.1.0 mamba-ssm==1.1.2 spconv-cu117 \
     numba==0.53.0 nuscenes-devkit lyft_dataset_sdk plyfile scikit-image \
     tensorboard 'trimesh>=2.35.39,<2.35.40' 'networkx>=2.2,<2.3'
@@ -181,6 +188,13 @@ python ./tools/create_hilbert_curve_template.py
 
 ## Troubleshooting
 
+- **`ImportError: libQt5Core-*.so.5.15.18: cannot open shared object file`**
+  — The GUI-flavor `opencv-python` got installed (typically pulled in by
+  `mmcv-full`). Its bundled Qt5 library won't load on headless servers. Fix:
+  `pip uninstall -y opencv-python opencv-python-headless && pip install
+  opencv-python-headless==4.5.5.64`. On the offline target, transfer the
+  wheel first and use `pip install --no-index --find-links /path/to/wheels
+  opencv-python-headless==4.5.5.64`.
 - **`ImportError: cannot import name 'bev_pool_v2_ext'`** — The extension was
   not compiled, or the wrong CUDA arch was baked in. Rebuild with
   `TORCH_CUDA_ARCH_LIST` matching the target (`"8.0"` for A30/A100).
