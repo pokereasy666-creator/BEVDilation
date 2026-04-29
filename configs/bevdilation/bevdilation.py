@@ -110,7 +110,7 @@ model = dict(
         vx_config=dict(
             fg_thr=0.4,
             curve_rank=8,
-            curve_template_path='/home/guowen/Multimodal/OpenCode_AAAI/BEVDilation/curve_template_2d_rank_8.pth',
+            curve_template_path='./data/hilbert/curve_template_2d_rank_8.pth',
             img_channels=32,
             lidar_channels=192,
             img_encoder_num=[2, 1, 1],
@@ -418,4 +418,4 @@ optimizer_config = dict(
 two_stage = True
 runner = dict(type='TwoStageRunner', max_epochs=10)
 num_proposals_test = 300
-load_from = '/home/guowen/code/BEVDet/pretrained_models/r50_fpn_nuImage_pretrained.pth'
+load_from = './pretrained/r50_fpn_nuImage_pretrained.pth'

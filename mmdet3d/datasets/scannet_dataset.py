@@ -448,7 +448,7 @@ class ScanNetSegDataset(Custom3DSegDataset):
         mmcv.mkdir_or_exist(txtfile_prefix)
 
         # need to map network output to original label idx
-        pred2label = np.zeros(len(self.VALID_CLASS_IDS)).astype(np.int)
+        pred2label = np.zeros(len(self.VALID_CLASS_IDS)).astype(int)
         for original_label, output_idx in self.label_map.items():
             if output_idx != self.ignore_index:
                 pred2label[output_idx] = original_label
@@ -457,7 +457,7 @@ class ScanNetSegDataset(Custom3DSegDataset):
         for i, result in enumerate(results):
             info = self.data_infos[i]
             sample_idx = info['point_cloud']['lidar_idx']
-            pred_sem_mask = result['semantic_mask'].numpy().astype(np.int)
+            pred_sem_mask = result['semantic_mask'].numpy().astype(int)
             pred_label = pred2label[pred_sem_mask]
             curr_file = f'{txtfile_prefix}/{sample_idx}.txt'
             np.savetxt(curr_file, pred_label, fmt='%d')

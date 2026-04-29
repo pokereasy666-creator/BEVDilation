@@ -519,7 +519,7 @@ class ObjectSample(object):
                 input_dict['img'] = sampled_dict['img']
         gt_bboxes_ignore = np.ones_like(gt_labels_3d)
         gt_bboxes_ignore[num_exist:] = 0
-        gt_bboxes_ignore = gt_bboxes_ignore.astype(np.bool)
+        gt_bboxes_ignore = gt_bboxes_ignore.astype(bool)
         input_dict['gt_bboxes_ignore'] = gt_bboxes_ignore
         input_dict['gt_bboxes_3d'] = gt_bboxes_3d
         input_dict['gt_labels_3d'] = gt_labels_3d.astype(np.int64)
@@ -924,14 +924,14 @@ class ObjectRangeFilter(object):
 
         if 'gt_bboxes_ignore' in input_dict:
             gt_bboxes_ignore = input_dict['gt_bboxes_ignore']
-            gt_bboxes_ignore = gt_bboxes_ignore[mask.numpy().astype(np.bool)]
+            gt_bboxes_ignore = gt_bboxes_ignore[mask.numpy().astype(bool)]
             input_dict['gt_bboxes_ignore'] = gt_bboxes_ignore
         gt_bboxes_3d = gt_bboxes_3d[mask]
         # mask is a torch tensor but gt_labels_3d is still numpy array
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
+        gt_labels_3d = gt_labels_3d[mask.numpy().astype(bool)]
 
         # limit rad to [-pi, pi]
         gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)

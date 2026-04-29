@@ -385,7 +385,7 @@ def show_seg_result_meshlab(data,
         # generate random color map
         max_idx = pred_seg.max()
         palette = np.random.randint(0, 256, size=(max_idx + 1, 3))
-    palette = np.array(palette).astype(np.int)
+    palette = np.array(palette).astype(int)
 
     show_seg_result(
         points,

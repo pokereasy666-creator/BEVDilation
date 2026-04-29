@@ -9,7 +9,7 @@ draw a curve
 
 import torch
 import pickle
-from ipdb import set_trace
+# from ipdb import set_trace  # unused debug import; ipdb is not a hard dep
 
 
 def convert_2d(xy:torch.Tensor, n:int) -> torch.Tensor:   

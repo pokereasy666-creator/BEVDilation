@@ -293,7 +293,7 @@ class PointSegClassMapping(object):
         # build cat_id to class index mapping
         neg_cls = len(valid_cat_ids)
         self.cat_id2class = np.ones(
-            self.max_cat_id + 1, dtype=np.int) * neg_cls
+            self.max_cat_id + 1, dtype=int) * neg_cls
         for cls_idx, cat_id in enumerate(valid_cat_ids):
             self.cat_id2class[cat_id] = cls_idx
 
