@@ -135,14 +135,16 @@ class Mamba_Auto_Regression(nn.Module):
             b_mask_m2 = coords[:, 0] == i
             feat_m2 = feats[b_mask_m2][inds_curt_to_next[i]][None]
             out_feat_m2 = mamba_layer1(feat_m2, None)
-            out_feat_3d_s2[b_mask_m2] = (out_feat_m2[0]).squeeze(0)[inds_next_to_curt[i]]
+            # Cast to destination dtype: under fp16 autocast Mamba returns Half
+            # while the destination tensor was allocated in default Float.
+            out_feat_3d_s2[b_mask_m2] = (out_feat_m2[0]).squeeze(0)[inds_next_to_curt[i]].to(out_feat_3d_s2.dtype)
 
             # Fackward SSMs
             b_mask_m1 = coords[:, 0] == i
             feat_m1 = feats[b_mask_m1][inds_curt_to_next[i]][None]
             feat_back = feat_m1.flip(1)
             out_feat_back = mamba_layer2(feat_back, None)
-            out_feat_3d_s1[b_mask_m1] = (out_feat_back[0]).squeeze(0).flip(0)[inds_next_to_curt[i]]
+            out_feat_3d_s1[b_mask_m1] = (out_feat_back[0]).squeeze(0).flip(0)[inds_next_to_curt[i]].to(out_feat_3d_s1.dtype)
 
         out_feat_3d_s2 = self.norm(out_feat_3d_s2)
         out_feat_3d_s1 = self.norm_back(out_feat_3d_s1)
