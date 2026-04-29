@@ -374,8 +374,8 @@ input_modality = dict(
     use_external=False)
 
 data = dict(
-    samples_per_gpu=4,  # for 16 GPU
-    workers_per_gpu=6,
+    samples_per_gpu=1,  # for 2 A30 (24GB) — original was 4, sized for 16x A6000
+    workers_per_gpu=4,
     train=dict(
         type='CBGSDataset',
         dataset=dict(
@@ -404,6 +404,17 @@ evaluation = dict(interval=20, pipeline=test_pipeline)
 # optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01)
 optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
     custom_keys={'img_backbone': dict(lr_mult=0.01),}))  # for 64 total batch size
+
+# A30 (24GB) memory fit: enable AMP and recover the original 64-sample
+# effective batch via gradient accumulation, so the LR above stays valid.
+# 1 sample/GPU * 2 GPUs * 32 cumulative_iters = 64 effective batch.
+fp16 = dict(loss_scale='dynamic')
+optimizer_config = dict(
+    type='GradientCumulativeOptimizerHook',
+    cumulative_iters=32,
+    grad_clip=dict(max_norm=35, norm_type=2),
+)
+
 two_stage = True
 runner = dict(type='TwoStageRunner', max_epochs=10)
 num_proposals_test = 300
