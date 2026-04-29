@@ -374,7 +374,7 @@ input_modality = dict(
     use_external=False)
 
 data = dict(
-    samples_per_gpu=1,  # for 2 A30 (24GB) — original was 4, sized for 16x A6000
+    samples_per_gpu=1,  # for A30 (24GB) — original was 4, sized for 16x A6000
     workers_per_gpu=4,
     train=dict(
         type='CBGSDataset',
@@ -410,10 +410,10 @@ optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
 # (Setting `fp16 = dict(...)` separately collides with `type=` here because
 # mmdet3d/apis/train.py:265 force-wraps optimizer_config with
 # Fp16OptimizerHook(**cfg.optimizer_config, ...) when `fp16` is present.)
-# 1 sample/GPU * 2 GPUs * 32 cumulative_iters = 64 effective batch.
+# 1 sample/GPU * 4 GPUs * 16 cumulative_iters = 64 effective batch.
 optimizer_config = dict(
     type='GradientCumulativeFp16OptimizerHook',
-    cumulative_iters=32,
+    cumulative_iters=16,
     loss_scale='dynamic',
     grad_clip=dict(max_norm=35, norm_type=2),
 )
