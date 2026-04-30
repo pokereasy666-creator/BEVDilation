@@ -405,16 +405,17 @@ evaluation = dict(interval=20, pipeline=test_pipeline)
 optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
     custom_keys={'img_backbone': dict(lr_mult=0.01),}))  # for 64 total batch size
 
-# A30 (24GB) memory fit: combine AMP (fp16) and gradient accumulation in a
-# single hook so the repo's custom train_detector doesn't double-wrap.
-# (Setting `fp16 = dict(...)` separately collides with `type=` here because
-# mmdet3d/apis/train.py:265 force-wraps optimizer_config with
-# Fp16OptimizerHook(**cfg.optimizer_config, ...) when `fp16` is present.)
+# A30 (24GB) memory fit: keep gradient accumulation to recover the original
+# 64-sample effective batch, but drop fp16 — at samples_per_gpu=1 the model
+# uses ~6 GB/GPU (see "memory" column in train logs), so we have ample
+# headroom for fp32. With fp16, BCE-with-logits in the BEV mask / image
+# classification heads overflows on confident batches; the dynamic loss
+# scaler then skips those steps, which stalls learning entirely
+# (matched_ious stays at random-init levels through epoch 3).
 # 1 sample/GPU * 4 GPUs * 16 cumulative_iters = 64 effective batch.
 optimizer_config = dict(
-    type='GradientCumulativeFp16OptimizerHook',
+    type='GradientCumulativeOptimizerHook',
     cumulative_iters=16,
-    loss_scale='dynamic',
     grad_clip=dict(max_norm=35, norm_type=2),
 )
 
