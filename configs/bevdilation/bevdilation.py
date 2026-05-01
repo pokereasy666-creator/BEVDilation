@@ -413,10 +413,24 @@ optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
 # scaler then skips those steps, which stalls learning entirely
 # (matched_ious stays at random-init levels through epoch 3).
 # 1 sample/GPU * 4 GPUs * 16 cumulative_iters = 64 effective batch.
+# grad_clip max_norm tightened from upstream 35 -> 10: the cyclic schedule
+# below ramps LR up to 5x base and the looser bound let one bad-batch
+# gradient blow up to nan around iter 57k of training (mid-epoch 2).
 optimizer_config = dict(
     type='GradientCumulativeOptimizerHook',
     cumulative_iters=16,
-    grad_clip=dict(max_norm=35, norm_type=2),
+    grad_clip=dict(max_norm=10, norm_type=2),
+)
+
+# Override cyclic_20e.py's target_ratio=(10, 1e-4): a peak of 10x base
+# (=1e-3) is too aggressive on this model and produced an unrecoverable
+# nan around iter 57k. (5, 1e-4) caps the peak at 5e-4 — same anneal
+# shape, half the peak.
+lr_config = dict(
+    policy='cyclic',
+    target_ratio=(5, 1e-4),
+    cyclic_times=1,
+    step_ratio_up=0.4,
 )
 
 two_stage = True
