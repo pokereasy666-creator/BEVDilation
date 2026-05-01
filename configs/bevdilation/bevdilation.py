@@ -406,29 +406,31 @@ optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
     custom_keys={'img_backbone': dict(lr_mult=0.01),}))  # for 64 total batch size
 
 # A30 (24GB) memory fit: keep gradient accumulation to recover the original
-# 64-sample effective batch, but drop fp16 — at samples_per_gpu=1 the model
-# uses ~6 GB/GPU (see "memory" column in train logs), so we have ample
-# headroom for fp32. With fp16, BCE-with-logits in the BEV mask / image
-# classification heads overflows on confident batches; the dynamic loss
-# scaler then skips those steps, which stalls learning entirely
-# (matched_ious stays at random-init levels through epoch 3).
+# 64-sample effective batch in fp32. At samples_per_gpu=1 we use ~9 GB/GPU
+# (24 GB available), so fp16 isn't needed — and was actively harmful when
+# we tried it (BCE overflow + dynamic-scaler skip stalled learning).
 # 1 sample/GPU * 4 GPUs * 16 cumulative_iters = 64 effective batch.
-# grad_clip max_norm tightened from upstream 35 -> 10: the cyclic schedule
-# below ramps LR up to 5x base and the looser bound let one bad-batch
-# gradient blow up to nan around iter 57k of training (mid-epoch 2).
+#
+# Use NanSkipGradientCumulativeOptimizerHook (defined in
+# mmdet3d/core/hook/nan_skip_optimizer.py) so that a single bad-batch
+# nan/inf in the loss or gradients is dropped on the floor instead of
+# being clipped (which doesn't sanitize nan) and written into the weights.
+# Without this, one rare numerically-bad batch leaves the model
+# unrecoverable for the rest of training. grad_clip max_norm tightened
+# upstream 35 -> 1.0 to bound the per-step update under AdamW even when
+# the cyclic LR is near peak.
 optimizer_config = dict(
-    type='GradientCumulativeOptimizerHook',
+    type='NanSkipGradientCumulativeOptimizerHook',
     cumulative_iters=16,
-    grad_clip=dict(max_norm=10, norm_type=2),
+    grad_clip=dict(max_norm=1.0, norm_type=2),
 )
 
-# Override cyclic_20e.py's target_ratio=(10, 1e-4): a peak of 10x base
-# (=1e-3) is too aggressive on this model and produced an unrecoverable
-# nan around iter 57k. (5, 1e-4) caps the peak at 5e-4 — same anneal
-# shape, half the peak.
+# Override cyclic_20e.py's target_ratio=(10, 1e-4). Peaks of 10x and 5x
+# base both produced unrecoverable nan; (2, 1e-4) caps the peak at 2e-4,
+# same anneal shape, conservative enough to stay stable through the run.
 lr_config = dict(
     policy='cyclic',
-    target_ratio=(5, 1e-4),
+    target_ratio=(2, 1e-4),
     cyclic_times=1,
     step_ratio_up=0.4,
 )
