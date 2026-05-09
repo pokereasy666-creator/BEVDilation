@@ -416,13 +416,14 @@ optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
 # nan/inf in the loss or gradients is dropped on the floor instead of
 # being clipped (which doesn't sanitize nan) and written into the weights.
 # Without this, one rare numerically-bad batch leaves the model
-# unrecoverable for the rest of training. grad_clip max_norm tightened
-# upstream 35 -> 1.0 to bound the per-step update under AdamW even when
-# the cyclic LR is near peak.
+# unrecoverable for the rest of training. grad_clip max_norm restored to
+# the paper's 35 after Step 1 diagnostic showed pre-clip grad norm
+# p99=5.9, max=35.2 over ~3k optimizer steps — the previous tight 1.0
+# clip was normalising every step (p50=3.0 >> 1.0), not bounding outliers.
 optimizer_config = dict(
     type='NanSkipGradientCumulativeOptimizerHook',
     cumulative_iters=16,
-    grad_clip=dict(max_norm=1.0, norm_type=2),
+    grad_clip=dict(max_norm=35, norm_type=2),
 )
 
 # Override cyclic_20e.py's target_ratio=(10, 1e-4). Peaks of 10x and 5x
