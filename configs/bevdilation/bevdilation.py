@@ -401,6 +401,9 @@ data = dict(
               img_info_prototype='bevdet'))
 
 evaluation = dict(interval=20, pipeline=test_pipeline)
+# Override default_runtime.py's epoch-based dict(interval=1) so a Ctrl-C at
+# any iter leaves behind a usable checkpoint. max_keep_ckpts bounds disk.
+checkpoint_config = dict(interval=2000, by_epoch=False, max_keep_ckpts=5)
 # optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01)
 optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
     custom_keys={'img_backbone': dict(lr_mult=0.01),}))  # for 64 total batch size
@@ -420,18 +423,25 @@ optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
 # the paper's 35 after Step 1 diagnostic showed pre-clip grad norm
 # p99=5.9, max=35.2 over ~3k optimizer steps — the previous tight 1.0
 # clip was normalising every step (p50=3.0 >> 1.0), not bounding outliers.
+# target_ratio raised from (2, 1e-4) to (5, 1e-4) after Step 2 confirmed
+# grad_clip wasn't the plateau constraint — matched_ious re-plateaued at
+# 0.46-0.48 from epoch 5, mirroring the pre-Step-1 plateau, so the
+# remaining binding constraint is peak LR.
 optimizer_config = dict(
     type='NanSkipGradientCumulativeOptimizerHook',
     cumulative_iters=16,
     grad_clip=dict(max_norm=35, norm_type=2),
 )
 
-# Override cyclic_20e.py's target_ratio=(10, 1e-4). Peaks of 10x and 5x
-# base both produced unrecoverable nan; (2, 1e-4) caps the peak at 2e-4,
-# same anneal shape, conservative enough to stay stable through the run.
+# Override cyclic_20e.py's target_ratio=(10, 1e-4). Set to (5, 1e-4) for
+# peak LR 5e-4 — half the paper's 10x, conservative headroom over the
+# previous Step-2 (2, 1e-4) plateau without going all the way to paper.
+# Earlier nan campaigns saw unrecoverable nan at 10x and 5x base, but
+# those runs lacked the NanSkipGradientCumulativeOptimizerHook above,
+# which now catches per-batch nan/inf before they corrupt weights.
 lr_config = dict(
     policy='cyclic',
-    target_ratio=(2, 1e-4),
+    target_ratio=(5, 1e-4),
     cyclic_times=1,
     step_ratio_up=0.4,
 )
