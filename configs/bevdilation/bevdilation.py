@@ -374,7 +374,7 @@ input_modality = dict(
     use_external=False)
 
 data = dict(
-    samples_per_gpu=1,  # for A30 (24GB) — original was 4, sized for 16x A6000
+    samples_per_gpu=3,  # Step 4: matches paper's per-GPU batch; original was 4 (16x A6000)
     workers_per_gpu=4,
     train=dict(
         type='CBGSDataset',
@@ -408,11 +408,12 @@ checkpoint_config = dict(interval=2000, by_epoch=False, max_keep_ckpts=5)
 optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
     custom_keys={'img_backbone': dict(lr_mult=0.01),}))  # for 64 total batch size
 
-# A30 (24GB) memory fit: keep gradient accumulation to recover the original
-# 64-sample effective batch in fp32. At samples_per_gpu=1 we use ~9 GB/GPU
-# (24 GB available), so fp16 isn't needed — and was actively harmful when
-# we tried it (BCE overflow + dynamic-scaler skip stalled learning).
-# 1 sample/GPU * 4 GPUs * 16 cumulative_iters = 64 effective batch.
+# A30 (24GB) memory fit: at samples_per_gpu=3 we expect 18-22 GB/GPU (still
+# under 24 GB available, confirmed by the Step 4 memory test), so fp16 isn't
+# needed — and was actively harmful when we tried it (BCE overflow +
+# dynamic-scaler skip stalled learning).
+# 3 samples/GPU * 4 GPUs * 1 cumulative_iters = 12 effective batch
+# (vs paper's 24 with 8 GPUs × 3 × 1).
 #
 # Use NanSkipGradientCumulativeOptimizerHook (defined in
 # mmdet3d/core/hook/nan_skip_optimizer.py) so that a single bad-batch
@@ -427,9 +428,16 @@ optimizer = dict(type='AdamW', lr=1e-4, weight_decay=0.01, paramwise_cfg=dict(
 # grad_clip wasn't the plateau constraint — matched_ious re-plateaued at
 # 0.46-0.48 from epoch 5, mirroring the pre-Step-1 plateau, so the
 # remaining binding constraint is peak LR.
+# Step 4: samples_per_gpu raised 1→3 (matches paper's per-GPU batch) and
+# cumulative_iters reduced 16→1 (eliminates 16× NaN amplification identified
+# in Step 3 diagnostic). Effective batch becomes 12 (4 GPUs × 3 × 1) vs paper's
+# 24 (8 GPUs × 3 × 1) — the only remaining unavoidable hardware-driven
+# deviation. With idle GPUs available, we match paper's per-GPU statistics
+# exactly. lr_config.target_ratio remains (5, 1e-4) for the first run;
+# revisit only if epoch-1 matched_ious is much lower than Step 3's 0.344.
 optimizer_config = dict(
     type='NanSkipGradientCumulativeOptimizerHook',
-    cumulative_iters=16,
+    cumulative_iters=1,
     grad_clip=dict(max_norm=35, norm_type=2),
 )
 
