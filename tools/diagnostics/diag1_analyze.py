@@ -46,6 +46,12 @@ import numpy as np
 GRID = 180
 CELL = 0.6                  # downstride(8) * voxel_size(0.075)
 PC_MIN = -54.0              # point_cloud_range min for x and y
+# Empirically-verified row correction (paired with the rot270 fix in load_z_fg):
+# after rot270, GT box centers still land 2 cells low in the row direction. A
+# row-offset sweep over ~27,500 GT centers across ~1000 frames (all scenes)
+# found mean z_fg peaks at +2 rows (+0.027) vs the unshifted -0.792 at +0
+# (+1 -> -0.258, +3 -> -0.423); the column profile is symmetric (no col offset).
+ROW_OFFSET = 2
 SPARSE_MAX_PTS = 10
 STATIC_MAX_SPEED = 0.5      # m/s
 MIN_TRACK_FRAMES = 3
@@ -102,21 +108,27 @@ def global_xy_to_ego_cell(xy, l2e_t, l2e_R, e2g_t, e2g_R):
     p = (p - e2g_t) @ e2g_R
     p = (p - l2e_t) @ l2e_R
     col = (p[:, 0] - PC_MIN) / CELL - 0.5
-    row = (p[:, 1] - PC_MIN) / CELL - 0.5
+    row = (p[:, 1] - PC_MIN) / CELL - 0.5 + ROW_OFFSET
     return np.stack([row, col], axis=1)
 
 
 def phys_to_cell(x, y):
-    """In-frame physical (x, y) -> (row, col) float (primary in-frame sampling)."""
+    """In-frame physical (x, y) -> (row, col) float (primary in-frame sampling).
+
+    Adds the empirical +ROW_OFFSET so GT centers land on the foreground peak in
+    the rot270-corrected z_fg frame.
+    """
     col = (np.asarray(x, dtype=np.float64) - PC_MIN) / CELL - 0.5
-    row = (np.asarray(y, dtype=np.float64) - PC_MIN) / CELL - 0.5
+    row = (np.asarray(y, dtype=np.float64) - PC_MIN) / CELL - 0.5 + ROW_OFFSET
     return row, col
 
 
 def cell_to_phys(row, col):
-    """(row, col) -> in-frame physical (x, y)."""
+    """(row, col) -> in-frame physical (x, y). Inverse of phys_to_cell; carries
+    -ROW_OFFSET so the GT rasterizer / secondary warp stay consistent with the
+    primary sampler."""
     x = (np.asarray(col, dtype=np.float64) + 0.5) * CELL + PC_MIN
-    y = (np.asarray(row, dtype=np.float64) + 0.5) * CELL + PC_MIN
+    y = (np.asarray(row, dtype=np.float64) - ROW_OFFSET + 0.5) * CELL + PC_MIN
     return x, y
 
 
@@ -174,13 +186,36 @@ def footprint_mask(boxes):
 # --------------------------------------------------------------------------- #
 # Loading / scene grouping
 # --------------------------------------------------------------------------- #
+def load_z_fg(src):
+    """Load z_fg and apply the empirically-verified orientation correction.
+
+    The dumped z_fg is rotated 270 deg relative to this analyzer's (row=y,
+    col=x) convention. Sweeping all 8 axis orientations and measuring IoU
+    between the predicted-foreground mask and the GT-footprint mask on the real
+    dumps gave median IoU 0.217 for rot270 (== transpose+fliplr) vs <=0.013 for
+    every other orientation (identity, transpose, the flips, the other
+    rotations). Root cause: the model's init_bev_mask meshgrid ordering
+    (indexing='ij', stack(y_coords, x_coords)) combined with the .flip(1) in
+    obtain_bev_mask_gt indexes z_fg rotated 270 deg from this convention.
+
+    Centralized here so the correction is applied identically by the primary
+    metric, the secondary metric and the verify-frame gate. ``src`` is an open
+    npz / dict (subscriptable) or a path.
+    """
+    if isinstance(src, (str, bytes)) or hasattr(src, '__fspath__'):
+        z = np.load(src, allow_pickle=True)['z_fg']
+    else:
+        z = src['z_fg']
+    return np.rot90(np.asarray(z, dtype=np.float64), k=3)
+
+
 def load_dumps(dump_dir):
     paths = sorted(glob.glob(osp.join(dump_dir, '*.npz')))
     frames = []
     for p in paths:
         d = np.load(p, allow_pickle=True)
         frames.append(dict(
-            z_fg=d['z_fg'].astype(np.float64),
+            z_fg=load_z_fg(d),
             token=str(d['token']),
             scene_token=str(d['scene_token']),
             timestamp=float(d['timestamp']),
@@ -327,6 +362,7 @@ def _track_record(chain, frames):
         n_sampled=n_sampled,
         std=std,
         mean_abs_delta=mad,
+        mean_z=float(np.mean(zvals)),
         median_pts=median_pts,
         mean_speed=mean_speed,
     )
@@ -351,6 +387,7 @@ def run_primary(scenes, velocity_frame='ego'):
         stds = np.asarray([r['std'] for r in records if r['bucket'] == b])
         mads = np.asarray([r['mean_abs_delta'] for r in records
                            if r['bucket'] == b])
+        mzs = np.asarray([r['mean_z'] for r in records if r['bucket'] == b])
         if stds.size:
             buckets[b] = dict(
                 n_tracks=int(stds.size),
@@ -359,10 +396,12 @@ def run_primary(scenes, velocity_frame='ego'):
                 p90=float(np.percentile(stds, 90)),
                 frac_std_lt_0_30=float(np.mean(stds < STD_THRESH)),
                 mean_abs_delta=float(np.mean(mads)),
+                mean_center_z=float(np.mean(mzs)),
             )
         else:
             buckets[b] = dict(n_tracks=0, mean=None, median=None, p90=None,
-                              frac_std_lt_0_30=None, mean_abs_delta=None)
+                              frac_std_lt_0_30=None, mean_abs_delta=None,
+                              mean_center_z=None)
     return buckets, records
 
 
@@ -525,7 +564,9 @@ def run_verify(scenes, verify_scenes):
 # --------------------------------------------------------------------------- #
 def config_block(velocity_frame):
     return dict(
-        GRID=GRID, CELL=CELL, PC_MIN=PC_MIN, SPARSE_MAX_PTS=SPARSE_MAX_PTS,
+        GRID=GRID, CELL=CELL, PC_MIN=PC_MIN, ROW_OFFSET=ROW_OFFSET,
+        z_fg_orientation='rot270_on_load',
+        SPARSE_MAX_PTS=SPARSE_MAX_PTS,
         STATIC_MAX_SPEED=STATIC_MAX_SPEED, MIN_TRACK_FRAMES=MIN_TRACK_FRAMES,
         MATCH_GATE_M=MATCH_GATE_M, STD_THRESH=STD_THRESH,
         FG_LOGIT_THR=FG_LOGIT_THR, velocity_frame=velocity_frame,
@@ -559,16 +600,18 @@ def print_report(report):
           f"frames: {report['n_frames']}  tracks: {report['n_tracks']}")
     print('\nPRIMARY (center-based, velocity-compensated tracking):')
     print(f"  {'bucket':<16}{'n':>5}{'mean':>9}{'median':>9}{'p90':>9}"
-          f"{'frac<0.30':>11}{'meanΔ':>9}")
+          f"{'frac<0.30':>11}{'meanΔ':>9}{'meanZ':>9}")
     for b in ('sparse_static', 'sparse_dynamic', 'dense_static',
               'dense_dynamic'):
         s = report['primary'][b]
         if s['n_tracks'] == 0:
-            print(f"  {b:<16}{0:>5}{'-':>9}{'-':>9}{'-':>9}{'-':>11}{'-':>9}")
+            print(f"  {b:<16}{0:>5}{'-':>9}{'-':>9}{'-':>9}{'-':>11}{'-':>9}"
+                  f"{'-':>9}")
         else:
             print(f"  {b:<16}{s['n_tracks']:>5}{s['mean']:>9.3f}"
                   f"{s['median']:>9.3f}{s['p90']:>9.3f}"
-                  f"{s['frac_std_lt_0_30']:>11.3f}{s['mean_abs_delta']:>9.3f}")
+                  f"{s['frac_std_lt_0_30']:>11.3f}{s['mean_abs_delta']:>9.3f}"
+                  f"{s['mean_center_z']:>9.3f}")
     sec = report['secondary']
     print(f"\n{sec['label']}:")
     print(f"  foreground std (median): {sec['foreground_std_median']}")
