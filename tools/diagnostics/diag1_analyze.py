@@ -62,6 +62,11 @@ VERIFY_SHIFT = 4            # +/- cell range searched in the frame-check
 VERIFY_IOU_OK = 0.20
 VERIFY_IOU_BAD = 0.10
 
+# stratification buckets, fixed order for reporting
+BUCKETS = ('sparse_static', 'sparse_dynamic', 'dense_static', 'dense_dynamic')
+# fg_fraction histogram edges: [0-.1)(.1-.3)(.3-.5)(.5-.7)(.7-.9)(.9-1]
+FG_FRACTION_BINS = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
+
 
 # --------------------------------------------------------------------------- #
 # Geometry helpers (verified against voxel_generation.py's BEV mapping)
@@ -350,6 +355,17 @@ def _track_record(chain, frames):
     zvals = np.asarray(zvals)
     std = float(np.std(zvals))
     mad = float(np.mean(np.abs(np.diff(zvals)))) if n_sampled >= 2 else 0.0
+
+    # decision-flip metric: threshold the center-z_fg series at FG_LOGIT_THR
+    # (raw crossing, no smoothing/hysteresis) and count fg/bg transitions. This
+    # is what TFP actually acts on -- an object can have high logit std but
+    # stable decisions (logit far from threshold) or vice versa.
+    decision = zvals > FG_LOGIT_THR
+    fg_fraction = float(np.mean(decision))
+    flip_count = int(np.count_nonzero(decision[1:] != decision[:-1]))
+    flip_rate = float(flip_count / (n_sampled - 1))  # n_sampled >= 2 here
+    is_boundary = bool(flip_count >= 1)
+
     median_pts = float(np.median(pts))
     mean_speed = float(np.mean(speeds))
     sparsity = 'sparse' if median_pts <= SPARSE_MAX_PTS else 'dense'
@@ -363,6 +379,10 @@ def _track_record(chain, frames):
         std=std,
         mean_abs_delta=mad,
         mean_z=float(np.mean(zvals)),
+        fg_fraction=fg_fraction,
+        flip_count=flip_count,
+        flip_rate=flip_rate,
+        is_boundary=is_boundary,
         median_pts=median_pts,
         mean_speed=mean_speed,
     )
@@ -383,25 +403,39 @@ def run_primary(scenes, velocity_frame='ego'):
                 records.append(rec)
 
     buckets = {}
-    for b in ('sparse_static', 'sparse_dynamic', 'dense_static', 'dense_dynamic'):
-        stds = np.asarray([r['std'] for r in records if r['bucket'] == b])
-        mads = np.asarray([r['mean_abs_delta'] for r in records
-                           if r['bucket'] == b])
-        mzs = np.asarray([r['mean_z'] for r in records if r['bucket'] == b])
-        if stds.size:
+    for b in BUCKETS:
+        recs = [r for r in records if r['bucket'] == b]
+        if not recs:
             buckets[b] = dict(
-                n_tracks=int(stds.size),
-                mean=float(np.mean(stds)),
-                median=float(np.median(stds)),
-                p90=float(np.percentile(stds, 90)),
-                frac_std_lt_0_30=float(np.mean(stds < STD_THRESH)),
-                mean_abs_delta=float(np.mean(mads)),
-                mean_center_z=float(np.mean(mzs)),
-            )
-        else:
-            buckets[b] = dict(n_tracks=0, mean=None, median=None, p90=None,
-                              frac_std_lt_0_30=None, mean_abs_delta=None,
-                              mean_center_z=None)
+                n_tracks=0, mean=None, median=None, p90=None,
+                frac_std_lt_0_30=None, mean_abs_delta=None, mean_center_z=None,
+                frac_boundary=None, mean_flip_rate_all=None,
+                mean_flip_rate_boundary=None, mean_fg_fraction=None,
+                fg_fraction_hist=[0, 0, 0, 0, 0, 0])
+            continue
+        stds = np.asarray([r['std'] for r in recs])
+        mads = np.asarray([r['mean_abs_delta'] for r in recs])
+        mzs = np.asarray([r['mean_z'] for r in recs])
+        flip_rates = np.asarray([r['flip_rate'] for r in recs])
+        fg_fracs = np.asarray([r['fg_fraction'] for r in recs])
+        boundary = np.asarray([r['is_boundary'] for r in recs], dtype=bool)
+        bnd_rates = flip_rates[boundary]
+        hist = np.histogram(fg_fracs, bins=FG_FRACTION_BINS)[0].astype(int)
+        buckets[b] = dict(
+            n_tracks=len(recs),
+            mean=float(np.mean(stds)),
+            median=float(np.median(stds)),
+            p90=float(np.percentile(stds, 90)),
+            frac_std_lt_0_30=float(np.mean(stds < STD_THRESH)),
+            mean_abs_delta=float(np.mean(mads)),
+            mean_center_z=float(np.mean(mzs)),
+            frac_boundary=float(np.mean(boundary)),
+            mean_flip_rate_all=float(np.mean(flip_rates)),
+            mean_flip_rate_boundary=(float(np.mean(bnd_rates))
+                                     if bnd_rates.size else None),
+            mean_fg_fraction=float(np.mean(fg_fracs)),
+            fg_fraction_hist=hist.tolist(),
+        )
     return buckets, records
 
 
@@ -574,21 +608,48 @@ def config_block(velocity_frame):
 
 
 def decision_line(buckets):
+    lines = []
     ss = buckets.get('sparse_static', {})
+
+    # existing logit-std signal
     if ss.get('n_tracks', 0) > 0 and ss.get('mean') is not None:
         m = ss['mean']
         if m < STD_THRESH:
-            verdict = (f'sparse_static mean z_fg std = {m:.3f} < {STD_THRESH} '
-                       '-> TFP stability case is WEAK (foreground already '
-                       'stable on the hard stratum)')
+            lines.append(
+                f'[logit-std] sparse_static mean z_fg std = {m:.3f} < '
+                f'{STD_THRESH} -> on this signal the foreground logit is '
+                'already stable on the hard stratum (case looks WEAK)')
         else:
-            verdict = (f'sparse_static mean z_fg std = {m:.3f} >= {STD_THRESH} '
-                       '-> TFP stability case HAS MERIT')
+            lines.append(
+                f'[logit-std] sparse_static mean z_fg std = {m:.3f} >= '
+                f'{STD_THRESH} -> on this signal the TFP stability case HAS '
+                'MERIT')
     else:
-        verdict = 'sparse_static bucket empty -- cannot evaluate decision line'
-    verdict += ('. NOTE: final TFP go/no-go also needs the Diagnostic-4 oracle '
-                'mask ceiling.')
-    return verdict
+        lines.append('[logit-std] sparse_static bucket empty -- cannot '
+                     'evaluate')
+
+    # decision-flip signal (the directly-TFP-relevant quantity)
+    if ss.get('n_tracks', 0) > 0 and ss.get('frac_boundary') is not None:
+        fb = ss['frac_boundary']
+        fr = ss['mean_flip_rate_boundary']
+        fr_s = f'{fr:.3f}' if fr is not None else 'n/a'
+        lines.append(
+            f'[decision-flip] sparse_static frac_boundary = {fb:.3f} '
+            '(fraction of sparse-static objects whose fg/bg decision flips), '
+            f'boundary-track mean flip rate = {fr_s}')
+        lines.append(
+            '  guidance: high frac_boundary + high boundary flip rate => TFP '
+            'has many substantially-flickering targets (strong stability '
+            'case); low frac_boundary => most objects are stably decided '
+            'regardless of logit noise (weak case -- the logit-std signal '
+            'overstates instability)')
+    else:
+        lines.append('[decision-flip] sparse_static bucket empty -- cannot '
+                     'evaluate')
+
+    lines.append('NOTE: final TFP go/no-go also needs the Diagnostic-4 oracle '
+                 'mask ceiling.')
+    return lines
 
 
 def print_report(report):
@@ -612,13 +673,34 @@ def print_report(report):
                   f"{s['median']:>9.3f}{s['p90']:>9.3f}"
                   f"{s['frac_std_lt_0_30']:>11.3f}{s['mean_abs_delta']:>9.3f}"
                   f"{s['mean_center_z']:>9.3f}")
+
+    print('\nPRIMARY -- decision flips (decision = center z_fg > FG_LOGIT_THR):')
+    print(f"  {'bucket':<16}{'n':>5}{'frac_bndry':>11}{'flip_all':>10}"
+          f"{'flip_bnd':>10}{'fg_frac':>9}")
+    for b in BUCKETS:
+        s = report['primary'][b]
+        if s['n_tracks'] == 0:
+            print(f"  {b:<16}{0:>5}{'-':>11}{'-':>10}{'-':>10}{'-':>9}")
+            continue
+        fb = s['mean_flip_rate_boundary']
+        fb_s = f'{fb:.3f}' if fb is not None else '-'
+        print(f"  {b:<16}{s['n_tracks']:>5}{s['frac_boundary']:>11.3f}"
+              f"{s['mean_flip_rate_all']:>10.3f}{fb_s:>10}"
+              f"{s['mean_fg_fraction']:>9.3f}")
+    print('  fg_fraction histogram bins '
+          '[0-.1)(.1-.3)(.3-.5)(.5-.7)(.7-.9)(.9-1]:')
+    for b in BUCKETS:
+        s = report['primary'][b]
+        print(f"    {b:<16}{s['fg_fraction_hist']}")
+
     sec = report['secondary']
     print(f"\n{sec['label']}:")
     print(f"  foreground std (median): {sec['foreground_std_median']}")
     print(f"  background std (median): {sec['background_std_median']}")
     print(f"  baseline-subtracted    : {sec['baseline_subtracted']}")
     print('\nDECISION:')
-    print(' ', report['decision'])
+    for line in report['decision']:
+        print('  -', line)
     print('=' * 72)
 
 
