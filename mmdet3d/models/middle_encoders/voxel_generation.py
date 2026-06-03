@@ -151,11 +151,44 @@ class Voxel_Generation(nn.Module):
         self.curve_template[f'curve_template_rank{rank}'] = template.reshape(-1)
         self.hilbert_spatial_size[f'curve_template_rank{rank}'] = (1, spatial_size, spatial_size) #[z, y, x]
     
-    def forward(self, voxel_feats, img_feats, batch_size, img_input_list=None):
-        
+    def forward(self, voxel_feats, img_feats, batch_size, img_input_list=None,
+                oracle_gt_bboxes_3d=None):
+
         voxel_feats_bev = voxel_feats.dense().detach().mean(dim=2)
         img_feats = self.img_layer(img_feats)
         bev_fg_mask = self.fg_pred(torch.cat([voxel_feats_bev, img_feats], dim=1))
+        # Diagnostic 4 Oracle A: replace the predicted foreground logits with the GT
+        # footprint, built by the SAME training-time call (obtain_bev_mask_gt) so it is
+        # frame-correct by construction. Guarded -> when oracle_gt_bboxes_3d is None the
+        # original predicted mask flows unchanged (off-path byte-identical to baseline).
+        if oracle_gt_bboxes_3d is not None:
+            device = bev_fg_mask.device
+            gt_mask = self.obtain_bev_mask_gt(oracle_gt_bboxes_3d, None, device,
+                                              bev_fg_mask)  # [B, H, W] long
+            if not getattr(self, '_oracle_checked', False):
+                # one-time on-path alignment self-check: the analog of diag1's
+                # verify-frame gate. The off-path control cannot catch a misaligned
+                # oracle mask, so confirm the GT footprint overlaps the model's own
+                # predicted foreground (diag1 measured this IoU ~0.5 when frame-correct).
+                self._oracle_checked = True
+                pred_fg = (bev_fg_mask.sigmoid() > self.fg_thr).squeeze(1)  # [B,H,W]
+                gt_fg = gt_mask.bool()
+                inter = (pred_fg & gt_fg).sum().item()
+                union = (pred_fg | gt_fg).sum().item()
+                iou = inter / union if union > 0 else 0.0
+                print(f'[oracle-align] GT-vs-predicted foreground IoU = {iou:.3f}')
+                if iou < 0.1:
+                    raise RuntimeError(
+                        f'[oracle-align] ORACLE MASK MISALIGNED (IoU {iou:.3f} < 0.1) '
+                        '-- ceiling invalid, do not trust mAP')
+                elif iou > 0.3:
+                    print('[oracle-align] oracle mask aligned, ceiling measurement valid')
+                else:
+                    print(f'[oracle-align] WARNING: marginal IoU {iou:.3f} (diag1 saw '
+                          '~0.5 when frame-correct); inspect before trusting mAP')
+            # +10 inside boxes, -10 outside -> after sigmoid()>fg_thr in expand_indices
+            # reproduces the binary GT footprint exactly via the unchanged threshold path.
+            bev_fg_mask = gt_mask.unsqueeze(1).to(bev_fg_mask.dtype) * 20.0 - 10.0
         x, rank = self.expand_indices(voxel_feats, bev_fg_mask, img_input_list)
         x = self.mamba_autoRegression(x, batch_size, self.curve_template[f'curve_template_rank{rank}'], self.hilbert_spatial_size[f'curve_template_rank{rank}'])
 

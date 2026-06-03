@@ -11,7 +11,12 @@ def clip_sigmoid(x, eps=1e-4):
 @DETECTORS.register_module()
 class BEVDilation(BEVDet):
     def __init__(self, **kwargs):
+        oracle_fg = kwargs.pop('oracle_fg', False)
         super(BEVDilation, self).__init__(**kwargs)
+
+        # Diagnostic 4 Oracle A: when True, simple_test injects the GT foreground
+        # mask at SVDB in place of the predicted one. Default off -> baseline.
+        self.oracle_fg = oracle_fg
 
         # image view auxiliary task heads
         self.num_cls = self.pts_bbox_head.num_classes
@@ -155,7 +160,15 @@ class BEVDilation(BEVDet):
         img_feats_bev = \
             self.img_view_transformer(img_feats + img_inputs[1:7],
                                       depth_from_lidar=kwargs['gt_depth'][0])
-        pts_feats, _ = self.extract_pts_feat(points, img_feats, img_metas, img_feats_bev[0])
+        # Diagnostic 4 Oracle A: route the pipeline-transformed GT boxes to SVDB so it
+        # builds the perfect foreground mask via obtain_bev_mask_gt. Only active when the
+        # flag is set and GT is collected (oracle config); otherwise off-path (None).
+        oracle_gt = None
+        if getattr(self, 'oracle_fg', False) and 'gt_bboxes_3d' in kwargs:
+            oracle_gt = kwargs['gt_bboxes_3d'][0]
+        pts_feats, _ = self.extract_pts_feat(
+            points, img_feats, img_metas, img_feats_bev[0],
+            oracle_gt_bboxes_3d=oracle_gt)
 
         bbox_list = [dict() for _ in range(len(img_metas))]
         bbox_pts = self.simple_test_pts([img_feats, pts_feats, img_feats_bev],
