@@ -152,16 +152,33 @@ class Voxel_Generation(nn.Module):
         self.hilbert_spatial_size[f'curve_template_rank{rank}'] = (1, spatial_size, spatial_size) #[z, y, x]
     
     def forward(self, voxel_feats, img_feats, batch_size, img_input_list=None,
-                oracle_gt_bboxes_3d=None):
+                oracle_gt_bboxes_3d=None, oracle_mode=None):
 
         voxel_feats_bev = voxel_feats.dense().detach().mean(dim=2)
         img_feats = self.img_layer(img_feats)
         bev_fg_mask = self.fg_pred(torch.cat([voxel_feats_bev, img_feats], dim=1))
-        # Diagnostic 4 Oracle A: replace the predicted foreground logits with the GT
-        # footprint, built by the SAME training-time call (obtain_bev_mask_gt) so it is
-        # frame-correct by construction. Guarded -> when oracle_gt_bboxes_3d is None the
-        # original predicted mask flows unchanged (off-path byte-identical to baseline).
-        if oracle_gt_bboxes_3d is not None:
+        # Diagnostic 4: oracle_mode selects an inference-time substitution of the
+        # foreground mask fed to expand_indices. Guarded -> with oracle_mode None and
+        # oracle_gt_bboxes_3d None, the predicted mask flows unchanged (off-path
+        # byte-identical to baseline).
+        if oracle_mode == 'no_dilation':
+            # Proxy 4: disable dilation by zeroing the foreground mask so expand_indices
+            # dilates zero cells -- the model runs on its original sparse LiDAR voxels
+            # only (Mamba refinement, dense backbone, head all still run). The mAP drop
+            # from baseline is dilation's total inference-time contribution. Large-negative
+            # logits -> sigmoid()>fg_thr is False everywhere.
+            bev_fg_mask = torch.full_like(bev_fg_mask, -10.0)
+            if not getattr(self, '_nodilation_checked', False):
+                # one-time self-check (analog of gt-mode alignment): confirm the mask is
+                # genuinely empty so the measured drop is the full dilation cost.
+                self._nodilation_checked = True
+                n_fg = int((bev_fg_mask.sigmoid() > self.fg_thr).sum().item())
+                print(f'[no-dilation] foreground cells after zeroing = {n_fg} (expect 0)')
+                assert n_fg == 0, 'no_dilation mask still has foreground cells'
+        elif oracle_gt_bboxes_3d is not None:
+            # Oracle A (gt mode): replace the predicted foreground logits with the GT
+            # footprint, built by the SAME training-time call (obtain_bev_mask_gt) so it
+            # is frame-correct by construction.
             device = bev_fg_mask.device
             gt_mask = self.obtain_bev_mask_gt(oracle_gt_bboxes_3d, None, device,
                                               bev_fg_mask)  # [B, H, W] long

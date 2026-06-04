@@ -1,30 +1,38 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Diagnostic 4 Oracle A -- perfect-foreground-mask detection ceiling.
+"""Diagnostic 4 -- SVDB foreground-mask oracle / no-dilation eval.
 
-Runs the standard nuScenes val evaluation with the SVDB foreground mask replaced
-by the ground-truth footprint (oracle). The resulting NDS/mAP is the upper bound
-on what Temporal Foreground Propagation (TFP) could deliver -- the go/no-go gate.
+Runs the standard nuScenes val evaluation while substituting the SVDB foreground
+mask at inference. Three modes (--mode, or the legacy --oracle on/off):
+  * baseline    : no substitution (control; must reproduce baseline 74.6/72.0).
+  * gt          : Oracle A -- inject the perfect GT footprint. NDS/mAP is the upper
+                  bound on what Temporal Foreground Propagation (TFP) could deliver.
+  * no_dilation : Proxy 4 -- inject an all-empty mask so expand_indices dilates zero
+                  cells. The model runs on its original sparse LiDAR voxels only
+                  (Mamba refinement, dense backbone, head all still run). The mAP
+                  drop from baseline is dilation's total inference-time contribution
+                  -- the upper bound on what any dilation-improvement method (the
+                  persistence component) could ever recover.
 
-The oracle is gated by ``model.oracle_fg`` (set here). With ``--oracle off`` the
-flag is disabled and the run is a control that must reproduce the baseline
-(74.6/72.0), proving the GT-collection + plumbing did not perturb anything.
-
-The oracle mask is built inside the model by SVDB.obtain_bev_mask_gt from the
-pipeline-transformed GT boxes -- the SAME call used to build the training target
--- so it is frame-correct by construction. A one-time [oracle-align] IoU check
-inside Voxel_Generation.forward fails loud if the mask is misaligned.
+gt mode builds the mask inside the model via SVDB.obtain_bev_mask_gt from the
+pipeline-transformed GT boxes (the SAME call used for the training target), so it is
+frame-correct by construction; a one-time [oracle-align] IoU check fails loud if it
+is misaligned. no_dilation mode prints a one-time [no-dilation] count asserting the
+mask is empty. Both checks live in Voxel_Generation.forward.
 
 MUST run on the offline server (needs the full mmdet3d stack, a GPU, the trained
 checkpoint and val data). Cannot run in a bare CI/dev environment.
 
 Examples::
 
-    # oracle ceiling
+    # Oracle A ceiling (gt mask)
     python tools/diagnostics/diag4_oracle_eval.py \
-        configs/bevdilation/bevdilation_oracleA.py work_dirs/.../latest.pth
-    # control (should reproduce baseline)
+        configs/bevdilation/bevdilation_oracleA.py work_dirs/.../latest.pth --mode gt
+    # Proxy 4 (dilation disabled)
     python tools/diagnostics/diag4_oracle_eval.py \
-        configs/bevdilation/bevdilation_oracleA.py work_dirs/.../latest.pth --oracle off
+        configs/bevdilation/bevdilation_oracleA.py work_dirs/.../latest.pth --mode no_dilation
+    # control (should reproduce baseline) -- legacy --oracle off still works
+    python tools/diagnostics/diag4_oracle_eval.py \
+        configs/bevdilation/bevdilation_oracleA.py work_dirs/.../latest.pth --mode baseline
 """
 import argparse
 import os.path as osp
@@ -64,8 +72,16 @@ def parse_args():
         '--oracle',
         choices=['on', 'off'],
         default='on',
-        help='on: inject the GT foreground mask at SVDB (ceiling); '
-             'off: disable the flag (control, should reproduce baseline)')
+        help='legacy switch: on == "--mode gt" (Oracle A), off == "--mode baseline". '
+             'Ignored when --mode is given.')
+    parser.add_argument(
+        '--mode',
+        choices=['baseline', 'gt', 'no_dilation'],
+        default=None,
+        help='baseline: control, no injection (reproduces baseline); '
+             'gt: inject the perfect GT foreground mask (Oracle A ceiling); '
+             'no_dilation: inject an all-empty mask so dilation is disabled (Proxy 4). '
+             'Overrides --oracle when set.')
     return parser.parse_args()
 
 
@@ -118,9 +134,20 @@ def main():
     else:
         model.CLASSES = dataset.CLASSES
 
-    # ---- the only behavioral switch ----
-    model.oracle_fg = (args.oracle == 'on')
-    print(f'[diag4] oracle_fg = {model.oracle_fg} (--oracle {args.oracle})')
+    # ---- resolve mode (--mode wins; else derive from the legacy --oracle) ----
+    if args.mode is not None:
+        mode = args.mode
+    else:
+        mode = 'gt' if args.oracle == 'on' else 'baseline'
+    # map mode -> (oracle_fg, oracle_mode); set on the model before MMDataParallel
+    mode_map = {
+        'baseline': (False, None),
+        'gt': (True, 'gt'),
+        'no_dilation': (True, 'no_dilation'),
+    }
+    model.oracle_fg, model.oracle_mode = mode_map[mode]
+    print(f'[diag4] mode={mode} oracle_fg={model.oracle_fg} '
+          f'oracle_mode={model.oracle_mode}')
 
     model = MMDataParallel(model, device_ids=cfg.gpu_ids)
     outputs = single_gpu_test(model, data_loader)
@@ -136,7 +163,7 @@ def main():
 
     nds = next((v for k, v in metrics.items() if k.endswith('NDS')), None)
     mapv = next((v for k, v in metrics.items() if k.endswith('mAP')), None)
-    print(f'\n[diag4] oracle={args.oracle}  NDS={nds}  mAP={mapv}')
+    print(f'\n[diag4] mode={mode}  NDS={nds}  mAP={mapv}')
 
 
 if __name__ == '__main__':

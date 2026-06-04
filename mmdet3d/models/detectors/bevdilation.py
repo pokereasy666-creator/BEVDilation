@@ -12,11 +12,20 @@ def clip_sigmoid(x, eps=1e-4):
 class BEVDilation(BEVDet):
     def __init__(self, **kwargs):
         oracle_fg = kwargs.pop('oracle_fg', False)
+        oracle_mode = kwargs.pop('oracle_mode', None)
         super(BEVDilation, self).__init__(**kwargs)
 
         # Diagnostic 4 Oracle A: when True, simple_test injects the GT foreground
         # mask at SVDB in place of the predicted one. Default off -> baseline.
         self.oracle_fg = oracle_fg
+        # Diagnostic 4 Proxy 4: oracle_mode selects the SVDB foreground-mask injection:
+        #   None          -> off (baseline, byte-identical to the original forward)
+        #   'gt'          -> inject the perfect GT foreground mask (Oracle A ceiling)
+        #   'no_dilation' -> inject an all-empty mask so expand_indices dilates zero cells
+        # Backward compat: oracle_fg=True with no explicit mode means 'gt'.
+        if oracle_fg and oracle_mode is None:
+            oracle_mode = 'gt'
+        self.oracle_mode = oracle_mode
 
         # image view auxiliary task heads
         self.num_cls = self.pts_bbox_head.num_classes
@@ -160,15 +169,21 @@ class BEVDilation(BEVDet):
         img_feats_bev = \
             self.img_view_transformer(img_feats + img_inputs[1:7],
                                       depth_from_lidar=kwargs['gt_depth'][0])
-        # Diagnostic 4 Oracle A: route the pipeline-transformed GT boxes to SVDB so it
-        # builds the perfect foreground mask via obtain_bev_mask_gt. Only active when the
-        # flag is set and GT is collected (oracle config); otherwise off-path (None).
+        # Diagnostic 4: thread the oracle mode (and, for gt-mode, the pipeline-transformed
+        # GT boxes) to SVDB. oracle_mode selects the behavior in Voxel_Generation.forward:
+        #   'gt'          -> build the perfect foreground mask via obtain_bev_mask_gt
+        #   'no_dilation' -> inject an all-empty mask so expand_indices dilates zero cells
+        #   None          -> off-path (byte-identical to baseline)
+        oracle_mode = getattr(self, 'oracle_mode', None)
+        # backward compat: a bare oracle_fg=True (no explicit mode) means gt-injection
+        if oracle_mode is None and getattr(self, 'oracle_fg', False):
+            oracle_mode = 'gt'
         oracle_gt = None
-        if getattr(self, 'oracle_fg', False) and 'gt_bboxes_3d' in kwargs:
+        if oracle_mode == 'gt' and 'gt_bboxes_3d' in kwargs:
             oracle_gt = kwargs['gt_bboxes_3d'][0]
         pts_feats, _ = self.extract_pts_feat(
             points, img_feats, img_metas, img_feats_bev[0],
-            oracle_gt_bboxes_3d=oracle_gt)
+            oracle_gt_bboxes_3d=oracle_gt, oracle_mode=oracle_mode)
 
         bbox_list = [dict() for _ in range(len(img_metas))]
         bbox_pts = self.simple_test_pts([img_feats, pts_feats, img_feats_bev],

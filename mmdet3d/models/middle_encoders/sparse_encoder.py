@@ -136,7 +136,7 @@ class SparseEncoder(nn.Module):
         
     @auto_fp16(apply_to=('voxel_features', ))
     def forward(self, voxel_features, coors, batch_size, img_feats=None,
-                img_input_list=None, oracle_gt_bboxes_3d=None):
+                img_input_list=None, oracle_gt_bboxes_3d=None, oracle_mode=None):
         """Forward of SparseEncoder.
 
         Args:
@@ -170,7 +170,8 @@ class SparseEncoder(nn.Module):
         # out = self.mamba_autoRegression(out, batch)
         # out, pred_bev_mask = self.voxel_generation(out, img_feats, batch, img_input_list)
         out, pred_bev_mask = self.SVDB(out, img_feats, batch, img_input_list,
-                                       oracle_gt_bboxes_3d=oracle_gt_bboxes_3d)
+                                       oracle_gt_bboxes_3d=oracle_gt_bboxes_3d,
+                                       oracle_mode=oracle_mode)
         # out = self.conv_out(encode_features[-1])
         spatial_features = out.dense()
 

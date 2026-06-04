@@ -40,7 +40,7 @@ class CenterPoint(MVXTwoStageDetector):
             self.pts_bbox_head.with_velocity
 
     def extract_pts_feat(self, pts, img_feats, img_metas, img_feats_bev=None,
-                         oracle_gt_bboxes_3d=None):
+                         oracle_gt_bboxes_3d=None, oracle_mode=None):
         """Extract features of points."""
         if not self.with_pts_bbox:
             return None
@@ -48,12 +48,13 @@ class CenterPoint(MVXTwoStageDetector):
 
         voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
         batch_size = coors[-1, 0] + 1
-        # Diagnostic 4 Oracle A: only forward the oracle kwarg when GT boxes are present,
-        # so the off-path (and other detectors' middle encoders) stay byte-identical.
-        if oracle_gt_bboxes_3d is not None:
+        # Diagnostic 4: only forward the oracle kwargs when an oracle mode is active
+        # (gt boxes present, or a mode string), so the off-path (and other detectors'
+        # middle encoders) stay byte-identical.
+        if oracle_gt_bboxes_3d is not None or oracle_mode is not None:
             x, pred_bev_mask = self.pts_middle_encoder(
                 voxel_features, coors, batch_size, img_feats_bev, img_feats,
-                oracle_gt_bboxes_3d=oracle_gt_bboxes_3d)
+                oracle_gt_bboxes_3d=oracle_gt_bboxes_3d, oracle_mode=oracle_mode)
         else:
             x, pred_bev_mask = self.pts_middle_encoder(voxel_features, coors, batch_size, img_feats_bev, img_feats)
         x = self.pts_backbone(x, img_feats_bev)
