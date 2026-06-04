@@ -250,6 +250,16 @@ class Voxel_Generation(nn.Module):
         _, _inv, _counts = torch.unique(cat_indices, dim=0, return_counts=True, return_inverse=True)
         non_overlap_mask = _counts[_inv][len(voxel_feat.indices):] == 1
         zero_indices = zero_indices[non_overlap_mask]
+        # TEMPORARY debug instrumentation (Check 1, to be reverted): one-time per-process
+        # print of the dilated-voxel count. Sits in expand_indices, which runs in EVERY
+        # mode (baseline / gt / no_dilation) and is OUTSIDE any oracle guard, so the count
+        # can be compared across modes to confirm no_dilation actually disables dilation
+        # (expect a nonzero count in baseline and 0 in no_dilation).
+        if not getattr(self, '_dbg_dilation_printed', False):
+            self._dbg_dilation_printed = True
+            print(f'[dbg-dilation] dilated voxels added = {len(zero_indices)}  |  '
+                  f'original voxels N = {N}  |  '
+                  f'fraction added = {len(zero_indices) / max(N, 1):.4f}')
         indices_unique = torch.cat([voxel_feat.indices, zero_indices], dim=0)
         inpaint_mask = voxel_feat.features.new_zeros(len(indices_unique), dtype=torch.bool)
         inpaint_mask[N:] = True
