@@ -3,6 +3,7 @@ from .bevdet import BEVDet
 from mmdet.models import DETECTORS
 from mmdet3d.models.utils import FFN
 from mmdet3d.models.utils.spconv_voxelize import SPConvVoxelization
+from mmdet3d.models.fusion_layers.instance_guided_fusion import InstanceGuidedFusion
 
 def clip_sigmoid(x, eps=1e-4):
     y = torch.clamp(x.sigmoid_(), min=eps, max=1 - eps)
@@ -11,6 +12,9 @@ def clip_sigmoid(x, eps=1e-4):
 @DETECTORS.register_module()
 class BEVDilation(BEVDet):
     def __init__(self, **kwargs):
+        # IGF config must be popped before super().__init__: the parent
+        # MVXTwoStageDetector.__init__ rejects unknown kwargs.
+        igf_cfg = kwargs.pop('igf', None)
         super(BEVDilation, self).__init__(**kwargs)
 
         # image view auxiliary task heads
@@ -29,6 +33,10 @@ class BEVDilation(BEVDet):
         if pts_voxel_cfg:
             pts_voxel_cfg['num_point_features'] = 5
             self.pts_voxel_layer = SPConvVoxelization(**pts_voxel_cfg)
+
+        # Instance-Guided Fusion: residual BEV-feature refinement block inserted
+        # between the 2D dense backbone output and the head (identity at init).
+        self.igf = InstanceGuidedFusion(**igf_cfg) if igf_cfg is not None else None
 
     def extract_img_feat(self, img, img_metas):
         """Extract features of images."""
@@ -124,11 +132,17 @@ class BEVDilation(BEVDet):
                                       depth_from_lidar=kwargs['gt_depth'])
         pts_feats, pred_bev_mask = self.extract_pts_feat(points, img_feats, img_metas, img_feats_bev[0].clone())
 
+        # IGF residual refinement on the dense LiDAR BEV feature (variant A).
+        ins_heatmap = None
+        if self.igf is not None:
+            enhanced, ins_heatmap = self.igf(pts_feats[0])
+            pts_feats = [enhanced]
+
         losses = dict()
         losses_pts = \
             self.forward_pts_train([img_feats, pts_feats, img_feats_bev],
                                    gt_bboxes_3d, gt_labels_3d, img_metas,
-                                   gt_bboxes_ignore)
+                                   gt_bboxes_ignore, ins_heatmap=ins_heatmap)
         losses.update(losses_pts)
         losses_img_auxiliary = \
             self.forward_img_auxiliary_train(img_feats,img_metas,
@@ -141,6 +155,24 @@ class BEVDilation(BEVDet):
         loss_bev_mask = self.pts_bbox_head.loss_bevmask(clip_sigmoid(pred_bev_mask), gt_bev_mask.unsqueeze(1), avg_factor=max(gt_bev_mask.sum().item(), 1))
         losses.update(dict(loss_bev_mask=loss_bev_mask))
 
+        # Step-9 redundancy diagnostic: relative residual energy of IGF. Logged
+        # under a non-loss key so mmdet's _parse_losses never sums it into the
+        # backprop loss (only keys containing 'loss' are summed).
+        if self.igf is not None:
+            losses['igf_res_ratio'] = pts_feats[0].new_tensor(
+                self.igf._last_residual_ratio)
+
+        return losses
+
+    def forward_pts_train(self, feats, gt_bboxes_3d, gt_labels_3d,
+                          img_metas, gt_bboxes_ignore=None, ins_heatmap=None):
+        # feats == [img_feats, pts_feats, img_feats_bev]; DALHead.forward indexes
+        # feats[1][0] for the LiDAR BEV. The caller (forward_train) must always
+        # pass the full triplet; only pts_feats itself is rebound to [enhanced]
+        # beforehand. Never pass the bare [enhanced] list here.
+        outs = self.pts_bbox_head(feats)
+        losses = self.pts_bbox_head.loss(
+            gt_bboxes_3d, gt_labels_3d, outs, ins_heatmap=ins_heatmap)
         return losses
 
     def simple_test(self,
@@ -156,6 +188,11 @@ class BEVDilation(BEVDet):
             self.img_view_transformer(img_feats + img_inputs[1:7],
                                       depth_from_lidar=kwargs['gt_depth'][0])
         pts_feats, _ = self.extract_pts_feat(points, img_feats, img_metas, img_feats_bev[0])
+
+        # IGF residual refinement (discard the auxiliary heatmap at test time).
+        if self.igf is not None:
+            enhanced, _ = self.igf(pts_feats[0])
+            pts_feats = [enhanced]
 
         bbox_list = [dict() for _ in range(len(img_metas))]
         bbox_pts = self.simple_test_pts([img_feats, pts_feats, img_feats_bev],

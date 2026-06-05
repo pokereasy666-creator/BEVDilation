@@ -148,6 +148,19 @@ model = dict(
         groups=16,
         groups_img=2),
 
+    # Instance-Guided Fusion (variant A): residual BEV refinement between the
+    # 2D dense backbone output and the head; identity at init.
+    igf=dict(
+        in_channels=256,
+        inner_channels=128,
+        bev_size=180,
+        num_classes=10,
+        instance_num=200,
+        n_points=16,
+        num_context_layers=2,
+        use_pytorch_deform=False,   # CUDA (mmcv _ext) on the A30s
+    ),
+
     # head
     pts_bbox_head=dict(
         type='DALHead',

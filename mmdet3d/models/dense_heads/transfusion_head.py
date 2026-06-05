@@ -633,6 +633,16 @@ class TransFusionHead(nn.Module):
         )
         loss_dict["loss_heatmap"] = loss_heatmap
 
+        # IGF auxiliary instance heatmap (additive; no effect when absent).
+        # Supervised against the SAME Gaussian target as dense_heatmap.
+        ins_heatmap = kwargs.get("ins_heatmap", None)
+        if ins_heatmap is not None:
+            loss_dict["loss_heatmap_ins"] = self.loss_heatmap(
+                clip_sigmoid(ins_heatmap),
+                heatmap,
+                avg_factor=max(heatmap.eq(1).float().sum().item(), 1),
+            )
+
         # compute loss for each layer
         for idx_layer in range(self.num_decoder_layers if self.auxiliary else 1):
             if idx_layer == self.num_decoder_layers - 1 or (
